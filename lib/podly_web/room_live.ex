@@ -14,10 +14,11 @@ defmodule PodlyWeb.RoomLive do
   def render(assigns) do
     ~H"""
     <div class="p-10">
+      <button phx-click="clean_all">Clean All</button>
       <div class="flex h-full wrap w-full gap-2">
         <div class="h-full grow-0 self-center">
           <video
-            class="w-[20rem] rounded-xl"
+            class="w-[20rem] h-[20rem] rounded-xl"
             phx-hook="WebRtcVideo"
             id="broadcaster"
             controlslist="nofullscreen nodownload noremoteplayback"
@@ -33,7 +34,7 @@ defmodule PodlyWeb.RoomLive do
         <div class="grow flex flex-wrap w-[80vw] gap-2">
           <div :for={{target_id, _} <- @channels}>
             <video
-              class="w-[40rem] rounded-xl"
+              class="w-[40rem] h-[40rem] rounded-xl"
               phx-hook="WebRtcVideo"
               id={"channel_#{target_id}"}
               controlslist="nofullscreen nodownload noremoteplayback"
@@ -53,7 +54,16 @@ defmodule PodlyWeb.RoomLive do
   end
 
   @impl true
+  def handle_event("clean_all", _, socket) do
+    :ets.delete(:podly_senders)
+    :ets.delete(:podly_receivers)
+    :ets.new(:podly_senders, [:set, :public, :named_table])
+    :ets.new(:podly_receivers, [:set, :public, :named_table])
 
+    {:noreply, assign(socket, :channels, senders(socket))}
+  end
+
+  @impl true
   def handle_info(:added, socket), do: {:noreply, assign(socket, :channels, senders(socket))}
   def handle_info(:removed, socket), do: {:noreply, assign(socket, :channels, senders(socket))}
 
