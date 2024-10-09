@@ -7,13 +7,11 @@ defmodule Podly.Application do
 
   @impl true
   def start(_type, _args) do
-    :ets.new(:podly_senders, [:set, :public, :named_table])
-    :ets.new(:podly_receivers, [:set, :public, :named_table])
-
     children = [
       PodlyWeb.Telemetry,
       {Phoenix.PubSub, name: Podly.PubSub},
-      PodlyWeb.Endpoint
+      PodlyWeb.Endpoint,
+      Podly.Room
     ]
 
     # See https://hexdocs.pm/elixir/Supervisor.html

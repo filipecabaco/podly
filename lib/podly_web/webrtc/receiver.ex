@@ -72,13 +72,10 @@ defmodule PodlyWeb.Webrtc.Receiver do
       in_audio_track_id: nil,
       out_video_track_id: video_track.id,
       out_audio_track_id: audio_track.id,
-      type: :receive
+      type: :receiver
     }
 
-    case :ets.lookup(:podly_receivers, target_id) do
-      [{target_id, receivers}] -> :ets.insert(:podly_receivers, {target_id, [state | receivers]})
-      [] -> :ets.insert(:podly_receivers, {target_id, [state]})
-    end
+    Podly.Room.add_receiver(user_id, pc, video_track.id, audio_track.id)
 
     {:ok, state}
   end
@@ -101,7 +98,7 @@ defmodule PodlyWeb.Webrtc.Receiver do
       in_audio_track_id: nil,
       user_id: user_id,
       target_id: nil,
-      type: :send
+      type: :sender
     }
 
     {:ok, state}
@@ -114,11 +111,9 @@ defmodule PodlyWeb.Webrtc.Receiver do
   def handle_info({:ex_webrtc, _from, msg}, state), do: handle_webrtc_msg(msg, state)
 
   @impl true
-  def handle_info({:EXIT, pc, reason}, %{peer_connection: pc, user_id: user_id} = state) do
-    :ets.delete(:podly_receivers, user_id)
-    :ets.delete(:podly_senders, user_id)
-    Phoenix.PubSub.broadcast(Podly.PubSub, "senders", :removed)
-
+  def handle_info({:EXIT, _pc, reason}, state) do
+    %{user_id: user_id, type: type} = state
+    Podly.Room.leave(user_id, type)
     Logger.info("Peer connection process exited, reason: #{inspect(reason)}")
     {:stop, {:shutdown, :pc_closed}, state}
   end
@@ -165,10 +160,15 @@ defmodule PodlyWeb.Webrtc.Receiver do
         :audio -> %{state | in_audio_track_id: id}
       end
 
-    if state.type == :send do
-      :ets.insert(:podly_senders, {user_id, state})
-      Phoenix.PubSub.broadcast(Podly.PubSub, "senders", :added)
-    end
+    :ok =
+      Podly.Room.add_sender(
+        user_id,
+        state.peer_connection,
+        state.in_video_track_id,
+        state.in_audio_track_id,
+        state.out_video_track_id,
+        state.out_audio_track_id
+      )
 
     {:ok, state}
   end
@@ -216,23 +216,13 @@ defmodule PodlyWeb.Webrtc.Receiver do
 
   # Broadcast RTP packets to all registered receivers for this specific user id
   defp broadcast(rid, packet, %{user_id: self_user_id}) do
-    if Enum.reject(packet.extensions, &is_nil(&1.data)) != [] do
-      for {target_id, streams} <- :ets.tab2list(:podly_receivers),
-          %{user_id: user_id} = stream <- streams,
-          self_user_id == target_id do
-        if Process.alive?(stream.peer_connection) do
-          if rid in ["h", "m", "l"] do
-            PeerConnection.send_rtp(stream.peer_connection, stream.out_video_track_id, packet)
-          else
-            PeerConnection.send_rtp(stream.peer_connection, stream.out_audio_track_id, packet)
-          end
-        else
-          [{_, streams}] = :ets.lookup(:podly_receivers, target_id)
-          streams = Enum.reject(streams, fn s -> s.user_id == user_id end)
-          :ets.insert(:podly_receivers, {target_id, streams})
-          :ets.delete(:podly_senders, user_id)
-          Phoenix.PubSub.broadcast(Podly.PubSub, "senders", :removed)
-        end
+    for {user_id, receiver} <- Podly.Room.get_receivers(self_user_id) do
+      if Process.alive?(receiver.peer_connection) do
+        if rid in ["h", "m", "l"],
+          do: PeerConnection.send_rtp(receiver.peer_connection, receiver.video_out, packet),
+          else: PeerConnection.send_rtp(receiver.peer_connection, receiver.audio_out, packet)
+      else
+        Podly.Room.leave(user_id, :receiver)
       end
     end
   end
