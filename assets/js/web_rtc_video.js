@@ -11,8 +11,13 @@ const WebRtcVideo = {
         ? `${proto}//${window.location.host}/${type}/${userId}`
         : `${proto}//${window.location.host}/${type}/${userId}/${target_id}`;
 
-    const ws = new WebSocket(url);
+    this.el.addEventListener("loadeddata", (evt) => {
+      if (this.el.readyState >= HTMLMediaElement.HAVE_ENOUGH_DATA) {
+        this.el.play();
+      }
+    });
 
+    const ws = new WebSocket(url);
     ws.onopen = (_) => start_connection(ws);
     ws.onclose = (event) =>
       console.log("WebSocket connection was terminated:", event);
@@ -79,20 +84,8 @@ const WebRtcVideo = {
             });
       await pc.setLocalDescription(offer);
       ws.send(JSON.stringify({ type: "offer", data: offer }));
-      retryPlay(this.el);
     };
   },
 };
-async function retryPlay(element, attempts = 5) {
-  if (this.el && this.el.play() !== undefined) {
-    playPromise
-      .then((_) => video.pause())
-      .catch((error) => {
-        console.error("Auto-play was prevented", error);
-        if (attempts > 0) {
-          retryPlay(element, attempts - 1);
-        }
-      });
-  }
-}
+
 export default WebRtcVideo;

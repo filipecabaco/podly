@@ -19,30 +19,28 @@ defmodule PodlyWeb.RoomLive do
     ~H"""
     <div :if={@user_id} class="p-10">
       <div class="flex h-full wrap w-full gap-2">
-        <div class="h-full grow-0 self-center">
+        <div class="flex flex-col h-full grow-0 self-center">
           <video
             class="w-[20rem] h-max-[20rem] rounded-xl"
             phx-hook="WebRtcVideo"
             id="broadcaster"
             controlslist="nofullscreen nodownload noremoteplayback"
-            autoplay
             user-id={@user_id}
             type="send"
             muted
           />
-          <div class="absolute z-100 w-[20rem] text-center bg-[#2B825B] text-white rounded-xl mt-1">
+          <div class=" w-[20rem] text-center bg-[#2B825B] text-white rounded-xl mt-1">
             <%= @user_id %>
           </div>
         </div>
         <div class="grow flex flex-wrap w-[80vw] gap-2">
           <div :for={target_id <- @channels}>
             <video
-              class="w-[40rem] h-[40rem] rounded-xl"
+              class="w-[40rem] h-max-[40rem] rounded-xl"
               phx-hook="WebRtcVideo"
               id={"channel_#{target_id}"}
               controlslist="nofullscreen nodownload noremoteplayback"
               target-id={target_id}
-              autoplay
               user-id={@user_id}
               type="receive"
             />

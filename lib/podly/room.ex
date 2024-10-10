@@ -4,6 +4,7 @@ defmodule Podly.Room do
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts, name: __MODULE__)
 
   def init(_opts) do
+    Process.send_after(self(), :check_alive, 200)
     {:ok, %{receivers: %{}, senders: %{}}}
   end
 
@@ -92,5 +93,33 @@ defmodule Podly.Room do
 
   def handle_call({:get_senders, id}, _from, %{senders: senders} = state) do
     {:reply, Map.delete(senders, id), state}
+  end
+
+  def handle_info(:check_alive, state) do
+    %{senders: senders, receivers: receivers} = state
+
+    senders =
+      senders
+      |> Enum.map(fn {id, %{peer_connection: peer_connection} = sender} ->
+        if !Process.alive?(peer_connection) do
+          Phoenix.PubSub.broadcast(Podly.PubSub, "streams", {:left, id})
+          nil
+        else
+          {id, sender}
+        end
+      end)
+      |> Enum.reject(&is_nil/1)
+      |> Map.new()
+
+    receivers =
+      receivers
+      |> Enum.map(fn {id, %{peer_connection: peer_connection} = receivers} ->
+        if !Process.alive?(peer_connection), do: nil, else: {id, receivers}
+      end)
+      |> Enum.reject(&is_nil/1)
+      |> Map.new()
+
+    Process.send_after(self(), :check_alive, 200)
+    {:noreply, %{state | senders: senders, receivers: receivers}}
   end
 end

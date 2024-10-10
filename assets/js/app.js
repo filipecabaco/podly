@@ -9,7 +9,7 @@ let csrfToken = document
   .getAttribute("content");
 
 const config = {
-  longPollFallbackMs: 2500,
+  longPollFallbackMs: 10000,
   params: { _csrf_token: csrfToken },
   hooks: { WebRtcVideo },
 };
