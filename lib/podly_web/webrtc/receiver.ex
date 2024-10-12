@@ -75,7 +75,7 @@ defmodule PodlyWeb.Webrtc.Receiver do
       type: :receiver
     }
 
-    Podly.Room.add_receiver(user_id, pc, video_track.id, audio_track.id)
+    Podly.Room.add_receiver(state)
 
     {:ok, state}
   end
@@ -148,28 +148,19 @@ defmodule PodlyWeb.Webrtc.Receiver do
     candidate_json = ICECandidate.to_json(candidate)
     msg = Jason.encode!(%{"type" => "ice", "data" => candidate_json})
     Logger.info("Sent ICE candidate: #{candidate_json["candidate"]}")
+
     {:push, {:text, msg}, state}
   end
 
-  defp handle_webrtc_msg({:track, track}, %{user_id: user_id} = state) do
-    %MediaStreamTrack{kind: kind, id: id} = track
+  defp handle_webrtc_msg({:track, %{kind: :video, id: id}}, state) do
+    state = %{state | in_video_track_id: id}
+    :ok = Podly.Room.add_sender(state)
+    {:ok, state}
+  end
 
-    state =
-      case kind do
-        :video -> %{state | in_video_track_id: id}
-        :audio -> %{state | in_audio_track_id: id}
-      end
-
-    :ok =
-      Podly.Room.add_sender(
-        user_id,
-        state.peer_connection,
-        state.in_video_track_id,
-        state.in_audio_track_id,
-        state.out_video_track_id,
-        state.out_audio_track_id
-      )
-
+  defp handle_webrtc_msg({:track, %{kind: :audio, id: id}}, state) do
+    state = %{state | in_audio_track_id: id}
+    :ok = Podly.Room.add_sender(state)
     {:ok, state}
   end
 
@@ -216,11 +207,16 @@ defmodule PodlyWeb.Webrtc.Receiver do
 
   # Broadcast RTP packets to all registered receivers for this specific user id
   defp broadcast(rid, packet, %{user_id: self_user_id}) do
+    type = if rid in ["h", "m", "l"], do: :video, else: :audio
+    # Podly.Recorder.record(self_user_id, type, packet)
+
     for {user_id, receiver} <- Podly.Room.get_receivers(self_user_id) do
       if Process.alive?(receiver.peer_connection) do
-        if rid in ["h", "m", "l"],
-          do: PeerConnection.send_rtp(receiver.peer_connection, receiver.video_out, packet),
-          else: PeerConnection.send_rtp(receiver.peer_connection, receiver.audio_out, packet)
+        if type == :video,
+          do:
+            PeerConnection.send_rtp(receiver.peer_connection, receiver.out_video_track_id, packet),
+          else:
+            PeerConnection.send_rtp(receiver.peer_connection, receiver.out_audio_track_id, packet)
       else
         Podly.Room.leave(user_id, :receiver)
       end

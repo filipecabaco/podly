@@ -11,26 +11,23 @@ defmodule Podly.Room do
   @doc """
   Adds a sender user to the room
   """
-  def add_sender(id, peer_connection, video_in, audio_in, video_out, audio_out) do
-    content = %{
-      peer_connection: peer_connection,
-      video_in: video_in,
-      audio_in: audio_in,
-      video_out: video_out,
-      audio_out: audio_out
-    }
+  def add_sender(data) do
+    keys = [
+      :peer_connection,
+      :in_video_track_id,
+      :in_audio_track_id,
+      :out_video_track_id,
+      :out_audio_track_id
+    ]
 
-    GenServer.cast(__MODULE__, {:join, id, :sender, content})
+    content = Map.take(data, keys)
+
+    GenServer.cast(__MODULE__, {:join, data.user_id, :sender, content})
   end
 
-  def add_receiver(id, peer_connection, video_out, audio_out) do
-    content = %{
-      peer_connection: peer_connection,
-      video_out: video_out,
-      audio_out: audio_out
-    }
-
-    GenServer.cast(__MODULE__, {:join, id, :receiver, content})
+  def add_receiver(data) do
+    content = Map.take(data, [:peer_connection, :out_video_track_id, :out_audio_track_id])
+    GenServer.cast(__MODULE__, {:join, data.user_id, :receiver, content})
   end
 
   @doc """
@@ -69,11 +66,6 @@ defmodule Podly.Room do
   def handle_cast({:join, id, :receiver, content}, %{receivers: receivers} = state) do
     receivers = Map.put(receivers, id, content)
     {:noreply, %{state | receivers: receivers}}
-  end
-
-  def handle_cast({:leave, id, :sender}, %{senders: senders} = state)
-      when is_map_key(senders, id) do
-    {:noreply, state}
   end
 
   def handle_cast({:leave, id, :sender}, %{senders: senders} = state) do

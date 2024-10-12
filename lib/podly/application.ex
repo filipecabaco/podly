@@ -11,7 +11,8 @@ defmodule Podly.Application do
       PodlyWeb.Telemetry,
       {Phoenix.PubSub, name: Podly.PubSub},
       PodlyWeb.Endpoint,
-      Podly.Room
+      Podly.Room,
+      Podly.Recorder
     ]
 
     # See https://hexdocs.pm/elixir/Supervisor.html
