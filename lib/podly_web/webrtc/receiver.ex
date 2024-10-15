@@ -2,31 +2,50 @@ defmodule PodlyWeb.Webrtc.Receiver do
   require Logger
 
   alias ExWebRTC.ICECandidate
+  alias ExWebRTC.Media.IVF
+  alias ExWebRTC.Media.Ogg
   alias ExWebRTC.MediaStreamTrack
   alias ExWebRTC.PeerConnection
+  alias ExWebRTC.RTP.Depayloader
+  alias ExWebRTC.RTP.JitterBuffer
   alias ExWebRTC.RTPCodecParameters
   alias ExWebRTC.SessionDescription
 
   @behaviour WebSock
   @type t() :: %__MODULE__{
-          peer_connection: PeerConnection.peer_connection(),
-          user_id: String.t(),
-          target_id: String.t(),
-          in_video_track_id: String.t() | nil,
+          audio_buffer: JitterBuffer.t() | nil,
+          audio_depayloader: Depayloader.t() | nil,
+          audio_writer: Ogg.Writer.t() | nil,
           in_audio_track_id: String.t() | nil,
-          out_video_track_id: String.t() | nil,
+          in_video_track_id: String.t() | nil,
           out_audio_track_id: String.t() | nil,
-          type: :send | :receive
+          out_video_track_id: String.t() | nil,
+          peer_connection: PeerConnection.peer_connection(),
+          target_id: String.t(),
+          type: :send | :receive,
+          user_id: String.t(),
+          video_depayloader: Depayloader.t() | nil,
+          video_buffer: JitterBuffer.t() | nil,
+          video_frame_counter: non_neg_integer(),
+          video_writer: IVF.Writer.t() | nil,
+          peer_connection: PeerConnection.peer_connection()
         }
 
-  defstruct peer_connection: nil,
-            user_id: nil,
-            target_id: nil,
-            in_video_track_id: nil,
+  defstruct audio_buffer: nil,
+            audio_depayloader: nil,
+            audio_writer: nil,
             in_audio_track_id: nil,
-            out_video_track_id: nil,
+            in_video_track_id: nil,
             out_audio_track_id: nil,
-            type: nil
+            out_video_track_id: nil,
+            target_id: nil,
+            type: nil,
+            user_id: nil,
+            video_depayloader: nil,
+            video_buffer: nil,
+            video_frame_counter: 0,
+            video_writer: nil,
+            peer_connection: nil
 
   @ice_servers [
     %{urls: "stun:stun.l.google.com:19302"}
@@ -53,6 +72,7 @@ defmodule PodlyWeb.Webrtc.Receiver do
     video_codecs: @video_codecs,
     audio_codecs: @audio_codecs
   ]
+
   @impl true
   def init(%{"user_id" => user_id, "target_id" => target_id, "type" => :receive}) do
     {:ok, pc} = PeerConnection.start_link(@opts)
@@ -110,7 +130,6 @@ defmodule PodlyWeb.Webrtc.Receiver do
   @impl true
   def handle_info({:ex_webrtc, _from, msg}, state), do: handle_webrtc_msg(msg, state)
 
-  @impl true
   def handle_info({:EXIT, _pc, reason}, state) do
     %{user_id: user_id, type: type} = state
     Podly.Room.leave(user_id, type)
@@ -119,8 +138,24 @@ defmodule PodlyWeb.Webrtc.Receiver do
   end
 
   @impl true
+  def terminate(reason, %{type: :sender} = state) do
+    %{video_buffer: video_buffer, audio_buffer: audio_buffer} = state
+
+    {packets, _timer, _buffer} = JitterBuffer.flush(video_buffer)
+    state = store_packets(:video, packets, state)
+
+    {packets, _timer, _buffer} = JitterBuffer.flush(audio_buffer)
+    state = store_packets(:audio, packets, state)
+
+    %{video_writer: video_writer, audio_writer: audio_writer} = state
+    IVF.Writer.close(video_writer)
+    Ogg.Writer.close(audio_writer)
+
+    Logger.info("Sender WebSocket connection was terminated, reason: #{inspect(reason)}")
+  end
+
   def terminate(reason, _state) do
-    Logger.info("WebSocket connection was terminated, reason: #{inspect(reason)}")
+    Logger.info("Sender WebSocket connection was terminated, reason: #{inspect(reason)}")
   end
 
   defp handle_ws_msg(%{"type" => "offer", "data" => data}, state) do
@@ -153,13 +188,39 @@ defmodule PodlyWeb.Webrtc.Receiver do
   end
 
   defp handle_webrtc_msg({:track, %{kind: :video, id: id}}, state) do
-    state = %{state | in_video_track_id: id}
+    %{user_id: user_id} = state
+    <<fourcc::little-32>> = "VP80"
+
+    {:ok, video_writer} = IVF.Writer.open("./recordings/#{user_id}.ivf", fourcc: fourcc, height: 640, width: 480, num_frames: 900, timebase_denum: 15, timebase_num: 1)
+    {:ok, video_depayloader} = @video_codecs |> hd() |> Depayloader.new()
+    video_buffer = JitterBuffer.new()
+
+    state = %{
+      state
+      | in_video_track_id: id,
+        video_buffer: video_buffer,
+        video_depayloader: video_depayloader,
+        video_writer: video_writer
+    }
+
     :ok = Podly.Room.add_sender(state)
     {:ok, state}
   end
 
   defp handle_webrtc_msg({:track, %{kind: :audio, id: id}}, state) do
-    state = %{state | in_audio_track_id: id}
+    %{user_id: user_id} = state
+    {:ok, audio_writer} = Ogg.Writer.open("./recordings/#{user_id}.ogg")
+    {:ok, audio_depayloader} = @audio_codecs |> hd() |> Depayloader.new()
+    audio_buffer = JitterBuffer.new()
+
+    state = %{
+      state
+      | in_audio_track_id: id,
+        audio_buffer: audio_buffer,
+        audio_depayloader: audio_depayloader,
+        audio_writer: audio_writer
+    }
+
     :ok = Podly.Room.add_sender(state)
     {:ok, state}
   end
@@ -181,45 +242,65 @@ defmodule PodlyWeb.Webrtc.Receiver do
   end
 
   defp handle_webrtc_msg({:rtp, id, nil, packet}, %{in_audio_track_id: id} = state) do
-    if Enum.reject(packet.extensions, &is_nil(&1.data)) != [] do
-      PeerConnection.send_rtp(state.peer_connection, state.out_audio_track_id, packet)
-      broadcast(nil, packet, state)
-    end
-
+    PeerConnection.send_rtp(state.peer_connection, state.out_audio_track_id, packet)
+    broadcast(:audio, packet, state)
+    state = store(:audio, packet, state)
     {:ok, state}
   end
 
-  defp handle_webrtc_msg({:rtp, id, rid, packet}, %{in_video_track_id: id} = state) do
-    # rid is the id of the simulcast layer (set in `priv/static/script.js`)
-    # change it to "m" or "l" to change the layer
-    # when simulcast is disabled, `rid == nil`
-    if Enum.reject(packet.extensions, &is_nil(&1.data)) != [] do
-      if rid == "h" do
-        PeerConnection.send_rtp(state.peer_connection, state.out_video_track_id, packet)
-        broadcast(rid, packet, state)
-      end
-    end
-
+  defp handle_webrtc_msg({:rtp, id, _rid, packet}, %{in_video_track_id: id} = state) do
+    PeerConnection.send_rtp(state.peer_connection, state.out_video_track_id, packet)
+    broadcast(:video, packet, state)
+    state = store(:video, packet, state)
     {:ok, state}
   end
 
   defp handle_webrtc_msg(_msg, state), do: {:ok, state}
 
   # Broadcast RTP packets to all registered receivers for this specific user id
-  defp broadcast(rid, packet, %{user_id: self_user_id}) do
-    type = if rid in ["h", "m", "l"], do: :video, else: :audio
-    # Podly.Recorder.record(self_user_id, type, packet)
+  defp broadcast(type, packet, %{user_id: self_user_id}) do
+    for {_, %{peer_connection: peer_connection} = receiver} <- Podly.Room.get_receivers(self_user_id), Process.alive?(peer_connection) do
+      %{out_audio_track_id: out_audio_track_id, out_video_track_id: out_video_track_id} = receiver
 
-    for {user_id, receiver} <- Podly.Room.get_receivers(self_user_id) do
-      if Process.alive?(receiver.peer_connection) do
-        if type == :video,
-          do:
-            PeerConnection.send_rtp(receiver.peer_connection, receiver.out_video_track_id, packet),
-          else:
-            PeerConnection.send_rtp(receiver.peer_connection, receiver.out_audio_track_id, packet)
-      else
-        Podly.Room.leave(user_id, :receiver)
+      case type do
+        :audio -> PeerConnection.send_rtp(peer_connection, out_audio_track_id, packet)
+        :video -> PeerConnection.send_rtp(peer_connection, out_video_track_id, packet)
       end
+    end
+  end
+
+  defp store(:audio, packet, %{audio_buffer: buffer} = state) do
+    {packets, _timer, _buffer} = JitterBuffer.insert(buffer, packet)
+    store_packets(:audio, packets, state)
+  end
+
+  defp store(:video, packet, %{video_buffer: buffer} = state) do
+    {packets, _timer, _buffer} = JitterBuffer.insert(buffer, packet)
+    store_packets(:video, packets, state)
+  end
+
+  defp store_packets(type, packets, state) do
+    updated = Map.from_struct(state)
+    updated = for packet <- packets, into: updated, do: store_packet(type, packet, updated)
+    struct!(__MODULE__, updated)
+  end
+
+  defp store_packet(:audio, packet, %{audio_depayloader: depayloader, audio_writer: writer} = state) do
+    {opus_packet, depayloader} = Depayloader.depayload(depayloader, packet)
+    {:ok, writer} = Ogg.Writer.write_packet(writer, opus_packet)
+    %{state | audio_depayloader: depayloader, audio_writer: writer}
+  end
+
+  defp store_packet(:video, packet, %{video_depayloader: depayloader, video_writer: writer} = state) do
+    case Depayloader.depayload(depayloader, packet) do
+      {nil, depayloader} ->
+        %{state | video_depayloader: depayloader}
+
+      {vp8_frame, video_depayloader} ->
+        IO.inspect(vp8_frame)
+        frame = %IVF.Frame{timestamp: state.frames_cnt, data: vp8_frame}
+        {:ok, writer} = IVF.Writer.write_frame(writer, frame)
+        %{state | video_depayloader: video_depayloader, video_writer: writer, video_frame_counter: state.video_frame_counter + 1}
     end
   end
 end

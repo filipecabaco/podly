@@ -7,6 +7,8 @@ defmodule Podly.Application do
 
   @impl true
   def start(_type, _args) do
+    File.mkdir("./recordings")
+
     children = [
       PodlyWeb.Telemetry,
       {Phoenix.PubSub, name: Podly.PubSub},
